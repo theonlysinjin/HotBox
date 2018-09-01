@@ -12,10 +12,16 @@ const char *pass =  WIFI_Password;
 /////
 
 ///// THINGSPEAK /////
-String apiKey = THINGSPEAK_api;
-const char* server = "api.thingspeak.com";
-
 String talkBackID = THINGSPEAK_talkbackID;
+String talkbackAPI = THINGSPEAK_talkbackAPI;
+
+String hotbox_api_key = HOTBOX_api;
+String hotbox_channel_key = "261952";
+String base_api = "http://api.thingspeak.com";
+String update_uri = base_api + "/update";
+String command_uri = base_api + "/talkbacks/" + talkBackID + "/commands/execute.json?api_key=" + talkbackAPI;
+String light_state_uri = base_api + "/channels/" + hotbox_channel_key + "/fields/5/last.txt?api_key=" + hotbox_api_key;
+String pump_state_uri = base_api + "/channels/" + hotbox_channel_key + "/fields/6/last.txt?api_key=" + hotbox_api_key;
 /////
 
 ///// RELAY /////
@@ -29,13 +35,6 @@ int DHTPin = 14;
 DHT dht(DHTPin, DHTTYPE);
 /////
 
-///// TIMING /////
-long oneMinute = 60000;
-long endMsTimer = millis();
-int minutes = 0;
-int cmdCheckTimer = -1;
-/////
-
 ///// JSON DECODING /////
 const size_t MAX_CONTENT_SIZE = 512;       // max size of the HTTP response
 /////
@@ -47,6 +46,7 @@ const size_t MAX_CONTENT_SIZE = 512;       // max size of the HTTP response
 void processCommands();
 void wifiConnect();
 void doEnv();
+void checkState();
 //Tasks
 int time_processCommands = 5000;
 Task SC_processCommands(10000, TASK_FOREVER, &processCommands);
@@ -54,34 +54,95 @@ int time_wifiConnect = 10;
 Task SC_wifiConnect(time_wifiConnect, TASK_FOREVER, &wifiConnect);
 int time_doEnv = 900000;
 Task SC_doEnv(time_doEnv, TASK_FOREVER, &doEnv);
+int time_checkState = 60000;
+Task SC_checkState(time_checkState, TASK_FOREVER, &checkState);
 //Task t3(5000, TASK_FOREVER, &t3Callback);
 
 Scheduler runner;
 //////
 
-void doCommand(String command) {
+void logger_lb(String type, String message, bool append) {
+  if (append) {
+    Serial.println(message);
+  } else {
+    Serial.println("[" + type + "] " + message);
+  }
+}
+
+void logger(String type, String message, bool append) {
+  if (append) {
+    Serial.print(message);
+  } else {
+    Serial.print("[" + type + "] " + message);
+  }
+}
+
+String httpPost(String uri, String apiKey, String postStr) {
+  HTTPClient http;
+  http.begin(uri);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  http.addHeader("X-THINGSPEAKAPIKEY", hotbox_api_key);
+  logger_lb("HTTP POST", "Connecting to " + uri, false);
+  int httpCode = http.POST(postStr);
+  String returnStr;
+  logger_lb("HTTP POST", "Status Code: " + String(httpCode), false);
+  if(httpCode == HTTP_CODE_OK) {
+    returnStr = http.getString();
+  } else {
+    returnStr = "";
+  }
+  http.end();
+  logger_lb("HTTP POST", "Got: " + returnStr, false);
+  return returnStr;
+}
+
+String httpGet(String uri, String apiKey, String postStr) {
+  uri = uri + postStr;
+  HTTPClient http;
+  http.begin(uri);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  logger_lb("HTTP POST", "Connecting to " + uri, false);
+  int httpCode = http.GET();
+  String returnStr;
+  logger_lb("HTTP POST", "Status Code: " + String(httpCode), false);
+  if(httpCode == HTTP_CODE_OK) {
+    returnStr = http.getString();
+  } else {
+    returnStr = "";
+  }
+  http.end();
+  logger_lb("HTTP POST", "Got: " + returnStr, false);
+  return returnStr;
+}
+
+void turnOn(int pin) {
+  digitalWrite(pin, HIGH);
+}
+
+void turnOff(int pin) {
+  digitalWrite(pin, LOW);
+}
+
+void doCommand(String command) { 
   if (command == "DOENV") {
     doEnv();
-  }
-// Relay
-  if (command == "PUMPON") {
-    digitalWrite(pump, HIGH);
-  }
-  if (command == "PUMPOFF") {
-    digitalWrite(pump, LOW);
-  }
-  if (command == "LIGHTSON") {
-    digitalWrite(lights, HIGH);
-  }
-  if (command == "LIGHTSOFF") {
-    digitalWrite(lights, LOW);
+  } else if (command == "CHECKSTATE") {
+    checkState();
+  } else if (command == "PUMPON") {
+    turnOn(pump);
+  } else if (command == "PUMPOFF") {
+    turnOff(pump);
+  } else if (command == "LIGHTSON") {
+    turnOn(lights);
+  } else if (command == "LIGHTSOFF") {
+    turnOff(lights);
   }
 }
 
 void processCommands() {
   Serial.println("Fetching commands!");
   HTTPClient http;
-  http.begin("http://api.thingspeak.com/talkbacks/" + talkBackID + "/commands/execute.json?api_key=" + apiKey);
+  http.begin(command_uri);
   int httpCode = http.GET();
 
   // httpCode will be negative on error
@@ -133,27 +194,48 @@ void submit(String field1, String field2, String field3, String field4) {
   // field2 -> Humidity
   // field3 -> Temperature
   // field4 -> Dew Point
-  if (client.connect(server,80)) { // "184.106.153.149" or api.thingspeak.com
-    String postStr = apiKey;
-    postStr +="&field1=";
-    postStr += String(field1);
-    postStr +="&field2=";
-    postStr += String(field2);
-    postStr +="&field3=";
-    postStr += String(field3);
-    postStr +="&field4=";
-    postStr += String(field4);
-    postStr += "\r\n\r\n";
-    
-    client.print("POST /update HTTP/1.1\n");
-    client.print("Host: api.thingspeak.com\n");
-    client.print("Connection: close\n");
-    client.print("X-THINGSPEAKAPIKEY: "+apiKey+"\n");
-    client.print("Content-Type: application/x-www-form-urlencoded\n");
-    client.print("Content-Length: ");
-    client.print(postStr.length());
-    client.print("\n\n");
-    client.print(postStr);
+  String postStr = "";
+  postStr +="&field1=";
+  postStr += String(field1);
+  postStr +="&field2=";
+  postStr += String(field2);
+  postStr +="&field3=";
+  postStr += String(field3);
+  postStr +="&field4=";
+  postStr += String(field4);
+  postStr += "\r\n\r\n";
+  
+  httpPost(update_uri, hotbox_api_key, postStr);
+}
+
+void checkState() {
+  bool failed = false;
+  String light_state = httpGet(light_state_uri, hotbox_api_key, "");
+  logger_lb("Light State: ", String(light_state), false);
+
+  if (light_state == "") {
+    failed = true;
+  } else if (light_state == "1") {
+    turnOn(lights);
+  } else {
+    turnOff(lights);
+  }
+
+  String pump_state = httpGet(pump_state_uri, hotbox_api_key, "");
+  logger_lb("Pump State: ", String(pump_state), false);
+  
+  if (pump_state == "") {
+    failed = true;
+  } else if (pump_state == "1") {
+    turnOn(pump);
+  } else {
+    turnOff(pump);
+  }
+
+  if (failed) {
+    SC_checkState.setInterval(10);
+  } else {
+    SC_checkState.setInterval(time_checkState);
   }
 }
 
@@ -166,6 +248,8 @@ void doEnv() {
 
   if (isnan(h) || isnan(t) || isnan(f)) {
     Serial.println("Failed to read from DHT sensor!");
+    // Try again in 10ms
+    SC_doEnv.setInterval(10);
   } else {
   // Compute heat index
   // Must send in temp in Fahrenheit!
@@ -190,6 +274,8 @@ void doEnv() {
   Serial.print("Dew Point (*C): ");
   Serial.println(dewP);
 
+  // Make sure we're at the correct delay
+  SC_doEnv.setInterval(time_doEnv);
   }
 }
 
@@ -243,24 +329,40 @@ void wifiConnect () {
   }
 }
 
-void setup() {
+void setPinModes() {
+  digitalWrite(pump, LOW);
+  digitalWrite(lights, LOW);
+  pinMode(pump, OUTPUT);
+  pinMode(lights, OUTPUT);
+  logger_lb("Setup / Pin Modes", "Outputs set to default.", false);
+}
+
+void setMain() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   Serial.begin(115200);
-  pinMode(pump, OUTPUT);
-  pinMode(lights, OUTPUT);
-  digitalWrite(pump, LOW);
-  digitalWrite(lights, LOW);
   dht.begin();
+  setPinModes();
+  
+  logger_lb("Setup / Main", "Completed main setup.", false);
+}
 
+void setScheduler() {
   runner.init();
   runner.addTask(SC_wifiConnect);
   runner.addTask(SC_processCommands);
   runner.addTask(SC_doEnv);
+  runner.addTask(SC_checkState);
   SC_wifiConnect.enable();
   SC_processCommands.enable();
   SC_doEnv.enable();
-  Serial.println("Initialized scheduler");
+  SC_checkState.enable();
+  logger_lb("Setup / Scheduler", "Initialized scheduler.", false);
+}
+
+void setup() {
+  setMain();
+  setScheduler();
 }
 
 void loop() {
